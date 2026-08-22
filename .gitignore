@@ -1,0 +1,25 @@
+# Quarto
+/.quarto/
+*_files/
+*.knit.md
+*_cache/
+
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+
+# Dados brutos — baixar do OSF, não versionar
+cs_bisnode_panel.csv
+
+# OS / editores
+.DS_Store
+.vscode/
+.idea/

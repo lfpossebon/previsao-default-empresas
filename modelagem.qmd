@@ -1,0 +1,909 @@
+---
+title: "Projeto Integrador — Aprendizagem Estatística de Máquina I"
+author: "Trabalho em grupo — PADS Insper"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+engine: knitr
+execute:
+  warning: false
+  message: false
+---
+
+**Objetivo:** Desenvolver um modelo preditivo para indicar se uma empresa deixará de operar em um período de até dois anos.
+
+**Base de dados:** `bisnode_2012_preprocessado_v3.csv` — painel de empresas com dados financeiros de 2012, pré-processado em Python.
+
+**Variável resposta:** `default` (1 = empresa encerrou operações em até 2 anos; 0 = continuou operando)
+
+```{r}
+library(tidyverse)
+library(tidytext)
+library(dplyr)
+library(ggplot2)
+library(rsample)
+library(pROC)
+library(yardstick)
+library(patchwork)
+library(glmnet)
+library(vip)
+library(ranger)
+library(xgboost)
+library(skimr)
+library(DALEX)
+library(rpart)        # Árvores de decisão
+library(rpart.plot)   # Visualização de árvores
+library(survival)     # Análise de sobrevivência
+library(survminer)    # Visualização de curvas de sobrevivência
+```
+
+```{r}
+# Parametrizando o formato dos gráficos
+knitr::opts_chunk$set(
+  fig.width = 8, 
+  fig.height = 6, 
+  fig.asp = 0.8, # Define a proporção altura/largura automaticamente
+  out.width = "100%" # Garante que ele ocupe a largura total da página sem distorcer
+)
+```
+
+
+## 1. Dados e Exploração Inicial
+
+```{r}
+df <- read.csv("data/bisnode_2012_preprocessado_v3.csv")
+
+cat("Dimensões:", nrow(df), "empresas x", ncol(df), "variáveis\n")
+
+# Distribuição da variável resposta
+df |>
+  count(default) |>
+  mutate(
+    classe    = ifelse(default == 1, "Default (saiu)", "Ativo"),
+    percentual = round(n / sum(n) * 100, 2)
+  )
+```
+
+## 2. Definição das Métricas de Avaliação
+
+O problema de prever o encerramento de empresas apresenta **desbalanceamento de classes**: empresas que encerram (default=1) são minoria. Isso torna a acurácia simples uma métrica enganosa — um modelo que prevê sempre "ativo" pode ter acurácia alta mas ser inútil.
+
+Além disso, o problema possui **assimetria de custo**, onde erros do tipo **falso negativo (FN)** — não identificar uma empresa que irá encerrar — são significativamente mais prejudiciais do que falsos positivos.
+
+| Métrica                     | Fórmula                                              | Etapa                                   | Definição                                              | Explicação |
+|----------------------------|------------------------------------------------------|------------------------------------------|--------------------------------------------------------|------------|
+| **AUC-PR (Área sob a curva Precision-Recall)** | Área sob a curva de precisão vs recall | Avaliação em cross-validation e qualidade geral dos modelos vencedores | Resume o trade-off entre sensibilidade (recall) e precisão (precision) ao longo de diferentes thresholds | Mede a capacidade do modelo de identificar corretamente a classe positiva, sendo mais informativa que a ROC-AUC em cenários com classe rara |
+| **F2-Score**               | (1 + 2²) * (Precisão * Recall) / (2² * Precisão + Recall) | Escolha de threshold e avaliação final   | Média harmônica ponderada entre precisão e recall       | Dá mais peso ao recall, priorizando a redução de falsos negativos na escolha do ponto de corte |
+| **KS (Kolmogorov-Smirnov)**| max diferença entre F₁(t) e F₀(t)                    | Qualidade geral dos modelos vencedores   | Diferença máxima entre as distribuições acumuladas de probabilidades para as classes | Mede o poder de separação entre as classes — amplamente utilizado em modelos de crédito e risco |
+| **Sensibilidade (Recall)** | VP / (VP + FN)                                       | Avaliação final                          | Proporção de positivos corretamente identificados       | Mede diretamente a capacidade de detectar empresas que vão encerrar |
+| **Precisão**               | VP / (VP + FP)                                       | Avaliação final                          | Proporção de positivos preditos que são corretos        | Controla o excesso de falsos positivos |
+| **Falso Negativo (FN)**    | FN = empresas default classificadas como ativas      | Avaliação final                          | Casos positivos classificados como negativos            | Erro mais crítico de negócio, representa perda financeira direta |                  | Empresas que encerram mas foram previstas como ativas   | Erro mais crítico de negócio |
+| **Falso Positivo (FP)**    | FP = empresas ativas classificadas como default      | Avaliação final                          | Casos negativos classificados como positivos            | Erro menos crítico de negócio, representa perda financeira marginal |                  | Empresas que encerram mas foram previstas como ativas   | Erro menos crítico |
+
+**Função auxiliar para calcular as métricas=** 
+
+```{r}
+calc_metricas <- function(prob, real, label = "Modelo") {
+  # Preparação
+  prob     <- as.numeric(unname(prob))
+  real_bin <- as.integer(real == "yes")
+
+  ok       <- !is.na(prob)
+  prob     <- prob[ok]
+  real_bin <- real_bin[ok]
+
+  # Grid de thresholds
+  cortes <- seq(0, 1, by = 0.01)
+
+  resultados <- purrr::map_dfr(cortes, function(corte) {
+    pred_bin <- as.integer(prob >= corte)
+
+    vp <- sum(pred_bin == 1 & real_bin == 1)
+    fp <- sum(pred_bin == 1 & real_bin == 0)
+    fn <- sum(pred_bin == 0 & real_bin == 1)
+
+    precision <- ifelse((vp + fp) == 0, 0, vp / (vp + fp))
+    recall    <- ifelse((vp + fn) == 0, 0, vp / (vp + fn))
+
+    beta2 <- 2^2
+    f2 <- ifelse((precision + recall) == 0, 0,
+                 (1 + beta2) * precision * recall / (beta2 * precision + recall))
+
+    tibble(
+      corte     = corte,
+      precision = precision,
+      recall    = recall,
+      f2        = f2,
+      fn        = fn,
+      fp        = fp
+    )
+  })
+
+  # Melhor threshold (max F2)
+  best <- resultados %>%
+    dplyr::slice_max(f2, n = 1, with_ties = FALSE)
+
+  # KS
+  prob_pos <- prob[real_bin == 1]
+  prob_neg <- prob[real_bin == 0]
+  ks_val   <- if (length(prob_pos) >= 2 && length(prob_neg) >= 2) {
+    tryCatch(
+      suppressWarnings(as.numeric(ks.test(prob_pos, prob_neg)$statistic)),
+      error = function(e) NA_real_
+    )
+  } else {
+    NA_real_
+  }
+
+  # AUC-PR
+  auc_pr <- pr_auc_vec(
+  truth = factor(real, levels = c("no", "yes")),
+  estimate = prob,
+  event_level = "second"
+    )
+
+  tibble(
+    Modelo     = label,
+    Threshold  = round(best$corte, 2),
+    AUC.PR     = round(auc_pr, 4), 
+    F2.Score = round(best$f2, 4),
+    KS         = round(ks_val, 4),
+    Recall     = round(best$recall, 4),
+    Precision  = round(best$precision, 4),
+    FN         = best$fn,
+    FP         = best$fp
+  )
+}
+```
+
+## 3. Modelos
+
+Serão ajustados cinco classes de modelos:
+
+| # | Modelo | Pacote | Hiperparâmetros ajustados |
+|---|--------|--------|---------------------------|
+| 1 | Regressão Logística | `stats::glm` | Nenhum |
+| 2 | Elastic-net | `glmnet` | λ via CV de 5 folds |
+| 3 | Floresta Aleatória | `ranger` | `ntrees`, `mtry` e `nodesize` via CV de 5 folds |
+| 4 | XGBoost | `xgboost` | `nrounds`, `eta`, `subsample` e `max_depth` via CV de 5 folds|
+
+**Separação treino e teste**
+
+```{r}
+df_model <- df |>
+  mutate(default = factor(default, levels = c(0, 1), labels = c("no", "yes"))) |>
+  mutate_if(is.character, as.factor) # Transforma colunas texto em fatores
+
+y <- df_model$default
+X <- model.matrix(default ~ . -1, df_model)
+
+df_model <- data.frame(X)
+df_model$default <- y
+ 
+set.seed(42)
+split <- initial_split(df_model, prop = 0.8, strata = default)
+treino <- training(split)
+teste <- testing(split)
+ 
+set.seed(42)
+folds <- vfold_cv(treino, v = 5)
+```
+
+### 3.1 Regressão Logística 
+
+A Regressão Logística modela a probabilidade de ocorrência do evento de interesse o assumindo uma relação linear entre as variáveis explicativas e o log-odds da resposta.
+
+**Treinando o modelo**
+
+```{r}
+
+fit_reglog <- glm(default ~ ., data = treino, family = 'binomial')
+prob_reglog <- predict(fit_reglog, teste, type = 'response')
+```
+
+**Visualizando métricas de avaliação**
+
+```{r}
+metr_reglog <- calc_metricas(prob_reglog, teste$default, label = "Reg. Logística")
+print(metr_reglog)
+```
+
+
+### 3.3 Elstic net 0.5 (rpart)
+
+A Regressão Logística com Elastic-Net estende o modelo clássico ao incorporar penalização na estimação dos coeficientes. A regularização combina as normas L1 (LASSO) e L2 (Ridge), com α = 0.5 atribuindo pesos iguais a ambas.
+
+**Treinando o modelo e visualizando o ajuste dos coeficientes e do melhor lamba via cross-validation do glmnet**
+
+```{r}
+set.seed(42)
+
+# Separação de treino e teste em matrizes para uso do GLMNET
+x_train <- as.matrix(treino |> select(-default))
+y_train <- treino$default
+
+x_test  <- as.matrix(teste |> select(-default))
+y_test  <- teste$default
+
+alfa = 0.5
+
+elastic_net <- glmnet(x_train, y_train, alpha = alfa, nlambda = 1000, family = "binomial")
+
+plot(elastic_net, lwd = 2, cex.lab = 1.3, xvar = "lambda")
+
+cv_elastic <- cv.glmnet(x_train, y_train, alpha = alfa, lambda = elastic_net$lambda, family = "binomial")
+
+plot(cv_elastic, cex.lab = 1.3)
+```
+
+**Visualizando coeficiente das preditoras no modelo ajustado**
+
+```{r}
+coef_elastic <- coef(cv_elastic, s = "lambda.min")
+
+coef_df <- data.frame(
+  variavel = rownames(coef_elastic),
+  coeficiente = as.vector(coef_elastic)
+) |> 
+  arrange(desc(abs(coeficiente)))   
+
+ggplot(coef_df |> filter(variavel != "(Intercept)"), 
+       aes(x = reorder(variavel, coeficiente), y = coeficiente, fill = coeficiente > 0)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("steelblue", "firebrick"), labels = c("Diminui a prob de default", "Aumenta a prob de default")) +
+  labs(title = "Impacto das Variáveis no Default (Elastic Net)",
+       x = "Variáveis", y = "Peso (Log-Odds)", fill = "Efeito") +
+  theme_minimal()
+```
+
+**Prevendo default no conjunto de teste e visualizando métricas de avaliação**
+
+```{r}
+#Gerando probabilidades
+prob_elastic <- predict(elastic_net, newx = x_test, s = cv_elastic$lambda.min, type = "response")
+#Calculando métricas
+metr_elastic <- calc_metricas(prob_elastic, teste$default, label = "Reg. Elastic Net")
+print(metr_elastic)
+```
+
+### 3.4 Floresta Aleatória
+
+A Floresta Aleatória (Random Forest) retorna a média das previsões de `ntrees` árvores crescidas em amostras bootstrap, com cada split considerando apenas `mtry` variáveis aleatórias. Isso reduz a correlação entre as árvores, tornando a média do ensemble mais estável e, consequentemente, diminuindo a variância do modelo sem aumentar significativamente o viés. 
+
+**Treinando modelos para validação cruzada**
+
+```{r}
+##REVIEW: ENTENDER ESSES FOLDS ESTRANHOS
+set.seed(42)
+k <- 5 
+folds <- sample(rep(1:k, length.out = nrow(treino)))
+
+treino$default <- as.factor(treino$default)
+
+grid <- expand.grid(
+  ntree = c(100, 200, 300), 
+  mtry = c(5, 7, 10), 
+  nodesize = c(5, 10, 20)
+)
+
+# Loop de validação cruzada
+resultados_rf <- map_dfr(1:nrow(grid), function(i) {
+  
+  params <- grid[i, ]
+  aucs_pr <- c() 
+  
+  for (f in 1:k) {
+    
+    treino_cv <- treino[folds != f, ]
+    valid_cv  <- treino[folds == f, ]
+    
+    # Treinando modelo
+    floresta <- ranger(
+      default ~ .,
+      data = treino_cv,
+      num.trees = params$ntrees,
+      mtry = params$mtry,
+      min.node.size = params$nodesize,
+      probability = TRUE,
+      importance = "permutation",
+      replace = TRUE,
+      sample.fraction = c(0.2, 0.2) # Sorteia proporções iguais das duas classes em cada árvore
+    )
+    
+    # Previsão
+    pred <- predict(floresta, valid_cv)$predictions[, "yes"]
+    
+    #Calculando AUC-PR
+    eval_df <- tibble(
+    real = factor(valid_cv$default, levels = c("yes", "no")), # 'yes' como primeiro nível (evento)
+    prob = pred
+    )
+
+    auc_pr_val <- eval_df |> 
+      yardstick::pr_auc(truth = real, prob) |> 
+      pull(.estimate)
+    aucs_pr <- c(aucs_pr, auc_pr_val)
+  }
+  
+  tibble(
+    ntrees = params$ntrees,
+    mtry = params$mtry,
+    nodesize = params$nodesize,
+    auc_pr_cv = mean(aucs_pr)
+  )
+})
+```
+
+**Visualizando melhor combinação de hiperparâmetros da validação cruzada e treinando o modelo com o conjunto de treino completo**
+
+```{r}
+print(resultados_rf |>           
+  arrange(desc(auc_pr_cv)))
+
+melhor_combinacao <- resultados_rf |> 
+  arrange(desc(auc_pr_cv)) |> 
+  slice(1)
+
+# Modelo otimizado
+set.seed(99)
+floresta_otimizada <- ranger(
+  default ~ .,
+  data = treino,
+  num.trees = melhor_combinacao$ntrees,
+  mtry = melhor_combinacao$mtry,
+  min.node.size = melhor_combinacao$nodesize,
+  probability = TRUE,
+  importance = "permutation",
+  replace = TRUE,
+  sample.fraction = c(0.2, 0.2)
+
+)
+```
+
+**Prevendo default no conjunto de teste e visualizando métricas de avaliação**
+
+```{r}
+#Gerando probabilidades
+prob_floresta_otimizada <- predict(floresta_otimizada, teste)$predictions[, "yes"]
+#Calculando métricas
+metr_floresta <- calc_metricas(prob_floresta_otimizada, teste$default, label = "Random Forest")
+print(metr_floresta)
+```
+
+**Visualizando importância de variáveis para o modelo**
+
+```{r}
+# 1. Gerar o objeto base
+p <- vip(floresta_otimizada, num_features = 15)
+
+# 2. Customizar garantindo que todos os '+' estejam conectados
+p +
+  geom_col(fill = "#00CC88") + 
+  geom_text(
+    aes(label = round(Importance, 3)), 
+    hjust = -0.1,          
+    color = "black",      
+    size = 5,           
+    fontface = "bold"     
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) + 
+  labs(
+    title = "Importância (Gain)", 
+    y = "Importância (Ganho)", 
+    x = "Variáveis"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_text(size = 12, face = "bold", color = "black"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+### 3.5 XGBoost
+
+O XGBoost (Extreme Gradient Boosting) é um método de boosting que constrói árvores de decisão de forma sequencial, onde cada nova árvore busca corrigir os erros residuais das anteriores. Diferente da Floresta Aleatória, que reduz variância via bagging, o XGBoost foca em reduzir o viés do modelo ao aprender padrões mais complexos.
+
+**Treinando modelos para validação cruzada**
+
+```{r}
+# Recriar folds
+set.seed(42)
+folds <- vfold_cv(treino, v = 5)
+
+# Calcular scale_pos_weight (importante se desbalanceado)
+n_pos <- sum(treino$default == "yes")
+n_neg <- sum(treino$default == "no")
+scale_pos_weight <- n_neg / n_pos
+
+# Criando matrizes XGB
+xgb_treino <- xgb.DMatrix(label = as.integer(treino$default == "yes"), data = as.matrix(select(treino, -default)))
+xgb_teste  <- xgb.DMatrix(label = as.integer(teste$default  == "yes"),  data = as.matrix(select(teste, -default)))
+
+hiperparametros_xgb <- crossing(
+  nrounds = c(200, 500),           # Número de árvores de decisão sequenciais
+  eta = c(0.01, 0.1),        # Taxa de aprendizado. Range: [0,1]
+  subsample = c(0.5, 0.7),             # Fração de observações selecionadas aleatoriamente
+  max_depth = c(4, 8)          # Máxima profundidade da árvore
+)
+
+xgboost_hiperparametros <- function(splits, eta, nrounds, subsample, max_depth){
+  treino_fold <- training(splits)
+  teste_fold  <- testing(splits)
+
+  xgb_treino <- xgb.DMatrix(
+  label = as.integer(treino_fold$default == "yes"),
+  data = as.matrix(select(treino_fold, -default))
+  )
+
+  xgb_teste <- xgb.DMatrix(
+  label = as.integer(teste_fold$default == "yes"),
+  data = as.matrix(select(teste_fold, -default))
+  )
+
+  fit_xgb <- xgb.train(
+    data = xgb_treino,
+    nrounds = nrounds,
+    evals = list(val = xgb_teste), 
+    early_stopping_rounds = 50,  #Early stopping rounds
+    params = list(
+      eta = eta,
+      subsample = subsample,
+      max_depth = max_depth,
+      nthread = 10,
+      objective = 'binary:logistic', 
+      eval_metric = 'aucpr'
+    ),
+    verbose = FALSE
+  )
+
+  best_iter <- fit_xgb$best_iteration
+
+  preds <- predict(
+  fit_xgb, 
+  xgb_teste
+  )
+
+  eval_df_xgb <- tibble(
+    real = factor(teste_fold$default, levels = c("no", "yes")),
+    prob = preds
+  )
+
+  auc_pr_val <- eval_df_xgb |> 
+    pr_auc(truth = real, prob) |> 
+    pull(.estimate)
+
+  return(as.numeric(auc_pr_val))
+}
+
+hiperparametros_xgb <- hiperparametros_xgb |>
+  crossing(folds) |>
+  mutate(
+    auc_pr_val = pmap_dbl(
+      list(splits, eta, nrounds, subsample, max_depth),
+      ~ xgboost_hiperparametros(..1, ..2, ..3, ..4, ..5)
+    )
+  ) |> 
+  group_by(eta, nrounds, subsample, max_depth) |> 
+  summarise(auc_pr_medio = mean(auc_pr_val, na.rm = TRUE)) |> 
+  arrange(desc(auc_pr_medio))
+
+```
+
+**Visualizando melhor combinação de hiperparâmetros da validação cruzada e treinando o modelo com o conjunto de treino completo**
+
+```{r}
+(hiperparametros_xgb_otimizados <- hiperparametros_xgb |> 
+  ungroup() |> 
+  slice_max(auc_pr_medio))
+
+auc_xgb_otimizado <- hiperparametros_xgb_otimizados$auc_pr_medio
+
+fit_xgboost_otimizado <- xgb.train(
+  data = xgb_treino,
+  nrounds = hiperparametros_xgb_otimizados$nrounds,  
+  params = list(
+    eta = hiperparametros_xgb_otimizados$eta,
+    subsample = hiperparametros_xgb_otimizados$subsample,
+    max_depth = hiperparametros_xgb_otimizados$max_depth,
+    nthread = 10,
+    objective = 'binary:logistic',
+    eval_metric = 'aucpr',
+    scale_pos_weight = scale_pos_weight  
+  ),
+  verbose = FALSE
+)
+```
+
+**Prevendo default no conjunto de teste e visualizando métricas de avaliação**
+
+```{r}  
+#Gerando probabilidades
+best_iter_final <- fit_xgboost_otimizado$best_iteration
+
+prob_xgboost <- predict(
+  fit_xgboost_otimizado, 
+  xgb_teste
+)
+
+#Métricas de avaliação
+metr_xgboost <- calc_metricas(prob_xgboost, teste$default, label = "XGBoost")
+print(metr_xgboost)
+
+```
+
+**Visualizando importância de variáveis para o modelo**
+
+```{r}
+# 1. Gerar o objeto base
+p <- vip(fit_xgboost_otimizado, num_features = 20, geom = "col")
+
+# 2. Customizar garantindo que todos os '+' estejam conectados
+p +
+  geom_col(fill = "#FF9900") + 
+  geom_text(
+    aes(label = round(Importance, 3)), 
+    hjust = -0.1,          
+    color = "black",      
+    size = 5,           
+    fontface = "bold"     
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) + 
+  labs(
+    title = "Importância (Gain)", 
+    y = "Importância (Ganho)", 
+    x = "Variáveis"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_text(size = 12, face = "bold", color = "black"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+## 4. Comparação dos Modelos
+
+Todos os modelos são avaliados no **mesmo conjunto de teste** com as métricas definidas na Seção 2.
+
+### 4.1 Comparativo de métricas e melhor modelo
+
+Observando a performance dos melhores modelos com relação às métricas definidas.
+
+```{r}
+# Tabela comparativa 
+resultados <- bind_rows(metr_reglog, metr_elastic, metr_floresta, metr_xgboost) |>
+  arrange(desc(F2.Score), desc(Recall), desc(Precision), desc(FN))
+
+print(resultados)
+
+# Melhor modelo
+melhor <- resultados$Modelo[1]
+cat("\nMelhor modelo por F2-Score:", melhor, "\n")
+```
+
+**Comentário:** Pela metodologia apresentada em aula, o Random Forest apresentou melhor performance segundo o critério do F2-Score (adotado pelo grupo como a mais relevante). Ainda, a AUC-PR também foi maior para esse modelo. Adicionalmente, é possível perceber que a performance do XGBoost foi bastante similar para a AUC-PR, F2-Score, Recall e Precision; para um problema de modelagem de risco de crédito, o conhecimento prévio do custo de um FN poderia alterar o ranking dos modelos discutidos. **Ainda assim, na seção final, apresentamos uma visão em que o custo de uma empresa que deu default é, em média, equivalente à receita de 3 contratos adimplentes.**
+
+**Visualização gráfica das métricas**
+
+```{r}                             
+resultados |>                        ## ajuste final de tamanho de fonte
+  select(-Threshold, -KS) |>
+  pivot_longer(cols = -Modelo, names_to = "Metrica", values_to = "Valor") |>
+  mutate(
+    Metrica = factor(Metrica, levels = c("AUC.PR", "F2.Score", "Recall", "Precision", "FN", "FP"))
+  ) |>
+  group_by(Metrica) |>
+  mutate(Modelo = reorder_within(Modelo, Valor, Metrica)) |> 
+  ggplot(aes(x = Modelo, y = Valor, fill = str_remove(Modelo, "___.*$"))) +
+  geom_col(alpha = 1, show.legend = FALSE) +
+  geom_text(aes(label = round(Valor, 3)), vjust = -0.5, size = 3) +
+  facet_wrap(~ Metrica, scales = "free", ncol = 2) +
+  tidytext::scale_x_reordered() +
+  scale_fill_manual(values = c("#5B5FFF", "#FF9900", "#00CC88", "#FF5757", "#9B59B6")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2))) +
+  labs(
+    title = "Comparação de Métricas por Modelo",
+    subtitle = "Ordenado individualmente por faceta",
+    x = NULL, y = NULL
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 35, hjust = 1),
+    strip.text = element_text(face = "bold"),
+    panel.grid.major.x = element_blank()
+  )
+```
+
+### 4.2 Curva Precision-Recall
+
+A curva Precision-Recall avalia o desempenho do modelo ao longo de diferentes thresholds de classificação, relacionando precisão (precision) e sensibilidade (recall). A análise da curva permite entender o trade-off entre identificar corretamente os casos positivos e evitar falsos positivos.
+
+```{r}
+# 1. Preparação dos Dados
+teste <- teste |>
+  mutate(default = factor(default, levels = c("yes", "no")))
+
+# 2. Empilhando as predições de todos os modelos
+df_predicoes <- bind_rows(
+  tibble(modelo = "Reg. Logística",    prob = prob_reglog,              real = teste$default),
+  tibble(modelo = "Elastic-net",       prob = as.numeric(prob_elastic), real = teste$default),
+  tibble(modelo = "Floresta Aleatória", prob = prob_floresta_otimizada, real = teste$default),
+  tibble(modelo = "XGBoost",           prob = prob_xgboost,             real = teste$default)
+)
+
+# 3. Cálculo das curvas e Plotagem
+df_predicoes |>
+  group_by(modelo) |>
+  group_modify(~ {
+    pr_curve(.x, truth = real, prob)
+  }) |>
+  ggplot(aes(x = recall, y = precision, color = modelo)) +
+  geom_line(linewidth = 1.1) +
+  scale_color_manual(values = c(
+    "Reg. Logística"     = "#5B5FFF",
+    "Elastic-net"        = "#00CC88",
+    "Floresta Aleatória" = "#FF5757",
+    "XGBoost"            = "#FF9900"
+  )) +
+  labs(
+    title = "Curvas Precision-Recall — Comparação dos Modelos",
+    x = "Recall (Sensibilidade)",
+    y = "Precision (Valor Preditivo Positivo)",
+    color = "Modelo"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+```
+
+### 4.3 Estatística KS 
+
+O gráfico KS mostra as **distribuições acumuladas** dos scores preditos para cada classe (Ativo vs. Default). A estatística KS mede a **separação máxima** entre essas curvas — quanto maior, melhor o modelo distingue as duas classes.
+
+```{r}
+# KS — distribuições acumuladas 
+ks_plot_base <- function(prob, real, label, cor) {
+  # Converter real para numérico
+  real_num <- as.numeric(real == "yes")
+  
+  df <- tibble(
+    score = prob, 
+    classe = factor(real_num, levels = c(0, 1), labels = c("Ativo", "Default"))
+  )
+  
+  # Cálculo do KS
+  prob_pos <- prob[real_num == 1]
+  prob_neg <- prob[real_num == 0]
+  
+  ks_val <- tryCatch(
+    round(as.numeric(suppressWarnings(ks.test(prob_pos, prob_neg)$statistic)), 3), 
+    error = function(e) NA_real_
+  )
+
+  ggplot(df, aes(x = score, color = classe)) +
+    stat_ecdf(linewidth = 1) +
+    scale_color_manual(values = c("Ativo" = "steelblue", "Default" = cor)) +
+    labs(
+      title = paste0(label, " (KS=", ks_val, ")"),
+      x = "Score predito", 
+      y = "Proporção acumulada"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      legend.position = "bottom", 
+      legend.title = element_blank(),
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 10)
+    )
+}
+
+# GERANDO OS GRÁFICOS
+ks1_b <- ks_plot_base(prob_reglog,              teste$default, "Reg. Logística",     "#5B5FFF")
+ks2_b <- ks_plot_base(as.numeric(prob_elastic), teste$default, "Elastic-net",        "#00CC88")
+ks3_b <- ks_plot_base(prob_floresta_otimizada,  teste$default, "Floresta Aleatória", "#FF5757")
+ks4_b <- ks_plot_base(prob_xgboost,             teste$default, "XGBoost",            "#FF9900")
+
+# Organizando o layout
+(ks1_b + ks2_b) / (ks3_b + ks4_b) +
+  plot_annotation(
+    title = "Estatística KS",
+    theme = theme(plot.title = element_text(size = 15, face = "bold", hjust = 0.5))
+  )
+```
+
+### 4.4 Matrizes de Confusão
+
+A Matriz de Confusão apresenta o cruzamento entre as classificações reais e as predições do modelo. Ela detalha o volume de acertos (Verdadeiros Positivos e Negativos) e erros (Falsos Positivos e Negativos), permitindo identificar se o modelo está enviesado ou confundindo classes específicas.
+
+```{r}
+# Chaves devem bater exatamente com resultados$Modelo (labels de calc_metricas)
+mapa_probs <- list(
+  "Random Forest"    = prob_floresta_otimizada,
+  "XGBoost"          = prob_xgboost,
+  "Reg. Elastic Net" = as.numeric(prob_elastic),
+  "Reg. Logística"   = prob_reglog
+)
+
+mapa_cores <- c(
+  "Random Forest"    = "#00CC88",
+  "XGBoost"          = "#FF9900",
+  "Reg. Elastic Net" = "#5B5FFF",
+  "Reg. Logística"   = "#FF5757"
+)
+
+# Reordenação
+probs_ordenadas  <- mapa_probs[resultados$Modelo]
+cores_ordenadas  <- mapa_cores[resultados$Modelo]
+
+#Função
+
+plot_confmat_final <- function(prob, real, corte, label, cor_fill) {
+
+  niveis  <- c(1, 0)
+  rotulos <- c("Default", "Ativo")
+
+  real_bin <- as.integer(real == "yes")
+
+  obs <- factor(real_bin, levels = niveis, labels = rotulos)
+
+  pred <- factor(
+    as.integer(prob >= corte),
+    levels = niveis,
+    labels = rotulos
+  )
+
+  cm <- as.data.frame(table(Observado = obs, Predito = pred))
+  total <- sum(cm$Freq)
+
+  get_freq <- function(o, p) {
+    val <- cm$Freq[cm$Observado == o & cm$Predito == p]
+    ifelse(length(val) == 0, 0, val)
+  }
+
+  vn <- get_freq("Ativo", "Ativo")
+  fp <- get_freq("Ativo", "Default")
+  fn <- get_freq("Default", "Ativo")
+  vp <- get_freq("Default", "Default")
+
+  sens <- round(vp / (vp + fn) * 100, 1)
+  prec <- ifelse((vp + fp) > 0, round(vp / (vp + fp) * 100, 1), 0)
+
+  cm <- cm |>
+    dplyr::mutate(
+      pct = round(Freq / total * 100, 1),
+      label_text = dplyr::case_when(
+        Observado == "Ativo"   & Predito == "Ativo"   ~ paste0("VN\n", Freq, "\n", pct, "%"),
+        Observado == "Ativo"   & Predito == "Default" ~ paste0("FP\n", Freq, "\n", pct, "%"),
+        Observado == "Default" & Predito == "Ativo"   ~ paste0("FN\n", Freq, "\n", pct, "%"),
+        Observado == "Default" & Predito == "Default" ~ paste0("VP\n", Freq, "\n", pct, "%")
+      ),
+      cor_quad = dplyr::case_when(
+        Observado == "Default" & Predito == "Ativo"   ~ "#CC0000",
+        Observado == "Ativo"   & Predito == "Default" ~ "#B0B0B0",
+        TRUE ~ cor_fill
+      )
+    )
+
+  ggplot(cm, ggplot2::aes(x = Predito, y = Observado)) +
+    geom_tile(fill = cm$cor_quad, color = "white", linewidth = 1.5) +
+    geom_text(aes(label = label_text), size = 3.2, fontface = "bold") +
+    coord_fixed() +
+    labs(
+      title = label,
+      subtitle = paste0("Threshold: ", corte, " | Sens: ", sens, "% | Prec: ", prec, "%"),
+      x = "Predito",
+      y = "Observado"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      panel.grid = element_blank()
+    )
+}
+
+#Gráficos
+
+cms_plots <- purrr::pmap(list(
+  probs_ordenadas,
+  resultados$Modelo, 
+  cores_ordenadas,
+  resultados$Threshold
+), function(p, n, c, t) {
+  plot_confmat_final(p, teste$default, t, n, c)
+})
+
+# Composição com Patchwork
+(cms_plots[[1]] + cms_plots[[2]]) / (cms_plots[[3]] + cms_plots[[4]]) +
+  plot_annotation(
+    title = "Matrizes de Confusão Otimizadas via F2-Score",
+    subtitle = "Ordenado por performance de F2-Score | Vermelho = Falsos Negativos, Cinza = Falsos Positivos, Cor do modelo = Acertos",
+    theme = theme(
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 10, hjust = 0.5, color = "grey30", face = "italic")
+    )
+  )
+```
+
+## 5. Ferramenta de Interpretabilidade (Modelo vencedor)
+
+### 5.1 Importância das Variáveis (VIP)
+
+Importância das variáveis por permutação. Esse método avalia o quanto a performance do modelo cai ao "embaralhar" os valores de uma variável específica: se a acurácia diminui drasticamente após a permutação, a variável é considerada crucial.
+
+```{r}
+# 1. Gerar o objeto base
+p <- vip(fit_xgboost_otimizado, num_features = 20, geom = "col")
+
+# 2. Customizar garantindo que todos os '+' estejam conectados
+p +
+  geom_col(fill = "#FF9900") + 
+  geom_text(
+    aes(label = round(Importance, 3)), 
+    hjust = -0.1,          
+    color = "black",      
+    size = 5,           
+    fontface = "bold"     
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) + 
+  labs(
+    title = "Importância (Gain)", 
+    y = "Importância (Ganho)", 
+    x = "Variáveis"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_text(size = 12, face = "bold", color = "black"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+### 5.2 Partial Dependence Plot (PDP)
+
+```{r}
+
+###AJUSTES FINAIS - MANTER OU NAO MANTER?
+
+# 1. Criar o Explainer do DALEX para o modelo vencedor (XGBoost)
+# Nota: O XGBoost precisa dos dados em matriz e o target numérico (0/1)
+explainer_xgb <- DALEX::explain(
+  model = fit_xgboost_otimizado,
+  data = as.matrix(select(treino, -default)),
+  y = as.integer(treino$default == "yes"),
+  label = "XGBoost"
+)
+
+# 2. Identificar automaticamente as 4 variáveis mais importantes via VIP
+# Extraímos os nomes das variáveis do objeto de importância que você já criou
+top_4_vars <- vi(fit_xgboost_otimizado) |> 
+  slice_max(Importance, n = 4) |> 
+  pull(Variable)
+
+# 3. Calcular os Perfis de Dependência Parcial (PDP)
+pdp_results <- model_profile(
+  explainer = explainer_xgb,
+  variables = top_4_vars,
+  type = "partial" # "partial" para PDP ou "accumulated" para ALE
+)
+
+# 4. Visualização
+plot(pdp_results) +
+  theme_minimal() +
+  labs(
+    title = "Partial Dependence Plots (PDP) - Top 4 Variáveis",
+    subtitle = "Impacto médio de cada variável na probabilidade de Default",
+    x = "Valor da Variável",
+    y = "Previsão Média (Probabilidade)"
+  ) +
+  scale_color_manual(values = "#FF9900") # Mantendo a identidade visual do XGBoost
+```
+
+## Resumo Executivo
+
+### Brilhar
+
+##AJUSTES FINAIS
