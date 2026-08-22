@@ -1,17 +1,7 @@
 ---
-title: "Projeto Integrador — Aprendizagem Estatística de Máquina I"
-author: "Trabalho em grupo — PADS Insper"
-format:
-  html:
-    toc: true
-    toc-depth: 3
-    code-fold: false
-    theme: cosmo
-    self-contained: true
+title: "2. Modelagem"
+subtitle: "Comparação de modelos e seleção sob custo assimétrico"
 engine: knitr
-execute:
-  warning: false
-  message: false
 ---
 
 **Objetivo:** Desenvolver um modelo preditivo para indicar se uma empresa deixará de operar em um período de até dois anos.
@@ -286,7 +276,7 @@ folds <- sample(rep(1:k, length.out = nrow(treino)))
 treino$default <- as.factor(treino$default)
 
 grid <- expand.grid(
-  ntree = c(100, 200, 300), 
+  ntrees = c(100, 200, 300), 
   mtry = c(5, 7, 10), 
   nodesize = c(5, 10, 20)
 )
@@ -906,44 +896,56 @@ plot(pdp_results) +
 
 O grupo adotou o F2-Score como métrica principal de comparação, por atribuir
 peso maior ao recall do que à precisão. A escolha é consistente com a
-assimetria de custo do problema, em que a não identificação de um default
-tende a ser mais onerosa do que um falso alarme. Por esse critério, e também
-por AUC-PR, o Random Forest obteve o melhor desempenho entre os quatro modelos
-avaliados: recall de 0,830 e 93 falsos negativos, contra 0,722 e 152 do
-XGBoost.
+assimetria de custo do problema, em que a não identificação de um default tende
+a ser mais onerosa do que um falso alarme.
+
+Por esse critério, o Random Forest apresenta o melhor resultado (0,676),
+seguido do XGBoost (0,675). A diferença é de uma milésima, insuficiente para
+sustentar a preferência por um dos dois. O Random Forest também lidera em
+AUC-PR (0,558 contra 0,548), enquanto o XGBoost apresenta o maior recall
+(0,907 contra 0,883) e o menor número de falsos negativos (85 contra 107).
 
 ### Efeito do custo assimétrico sobre o ranking
 
 Adotando-se a premissa de que o custo de uma empresa em default equivale à
-receita de três contratos adimplentes, o custo total de cada modelo pode ser
-expresso como `FN x 3 + FP`. Os valores resultantes são:
+receita de três contratos adimplentes, o custo total de cada modelo é dado por
+`FN x 3 + FP`:
 
 | Modelo | FN | FP | Custo total |
 |---|---:|---:|---:|
-| Reg. Logística | 145 | 963 | 1.398 |
-| XGBoost | 152 | 990 | 1.446 |
-| Elastic Net | 131 | 1.086 | 1.479 |
-| Random Forest | 93 | 1.224 | 1.503 |
+| Reg. Logística | 158 | 1.352 | 1.826 |
+| Random Forest | 107 | 1.507 | 1.828 |
+| Elastic Net | 150 | 1.379 | 1.829 |
+| XGBoost | 85 | 1.651 | 1.906 |
 
-Sob essa parametrização, a Regressão Logística apresenta o menor custo total e
-o Random Forest, o maior. A inversão em relação ao ranking por F2-Score decorre
-do volume de falsos positivos: a redução de 52 falsos negativos obtida pelo
-Random Forest é acompanhada de um acréscimo de 261 falsos positivos, cuja soma
-ponderada excede o ganho.
+Os três primeiros modelos ficam contidos em uma faixa de três unidades, ou
+0,2% do custo total, o que não permite distingui-los sob essa parametrização.
+O XGBoost é o único claramente dominado: o recall mais alto do conjunto é
+obtido ao custo de 1.651 falsos positivos, e sob a razão 3:1 o ganho de 73
+defaults detectados a mais que a Regressão Logística não compensa os 299
+falsos positivos adicionais.
 
-O ponto de indiferença entre os dois modelos ocorre em uma razão de custo de
-5,02. Para razões inferiores, a Regressão Logística apresenta menor custo
-esperado; para razões superiores, o Random Forest.
+O ponto de indiferença entre o Random Forest e a Regressão Logística ocorre em
+uma razão de custo de 3,04. Esse valor é praticamente idêntico à razão de 3:1
+assumida, o que significa que a premissa adotada situa-se exatamente sobre o
+limiar em que a ordenação entre os dois modelos se inverte. Pequenas variações
+na estimativa do custo relativo alteram qual dos dois é preferível.
 
 ### Considerações finais
 
-Os dois critérios aplicados conduzem a modelos distintos: o F2-Score seleciona
-o Random Forest e a razão de custo de 3:1 seleciona a Regressão Logística. A
-divergência indica que a seleção depende da parametrização econômica adotada,
-e não apenas do desempenho estatístico dos modelos. Recomenda-se, previamente
-a qualquer uso produtivo, substituir a razão de 3:1 por estimativas
-específicas da carteira — perda esperada por default e margem por contrato
-adimplente.
+Os critérios aplicados não convergem para um modelo único. O F2-Score separa
+Random Forest e XGBoost por margem desprezível; a razão de custo de 3:1 deixa
+três dos quatro modelos empatados e coincide com o ponto de indiferença entre
+os dois primeiros colocados.
+
+A conclusão pertinente é que, com as métricas disponíveis, a seleção não está
+determinada pelos dados. A definição depende de uma estimativa mais precisa do
+custo relativo entre falso negativo e falso positivo — perda esperada por
+default e margem por contrato adimplente da carteira específica — que
+substitua a razão de 3:1 adotada por premissa. Enquanto essa estimativa não
+existir, a escolha entre os três modelos empatados é arbitrária do ponto de
+vista econômico, e critérios secundários como custo computacional e
+interpretabilidade tornam-se decisivos.
 
 Registra-se ainda que a variável `inoffice_days` é endógena ao processo de
 encerramento das empresas, configurando risco de vazamento temporal reverso.

@@ -1,0 +1,38 @@
+project:
+  type: website
+  output-dir: docs
+  execute-dir: project
+  render:
+    - index.qmd
+    - 01-preparacao-dados.ipynb
+    - 02-modelagem.qmd
+
+website:
+  title: "Previsão de default de empresas"
+  description: "Projeto Integrador — Aprendizagem Estatística de Máquina I, PADS Insper"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Visão geral
+      - href: 01-preparacao-dados.ipynb
+        text: "1. Preparação de dados"
+      - href: 02-modelagem.qmd
+        text: "2. Modelagem"
+    right:
+      - icon: github
+        href: https://github.com/lfpossebon/previsao-default-empresas
+        aria-label: Repositório no GitHub
+  page-navigation: true
+
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    theme: cosmo
+    code-fold: false
+    self-contained: false
+
+execute:
+  warning: false
+  message: false
+  freeze: auto

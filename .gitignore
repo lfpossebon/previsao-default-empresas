@@ -1,8 +1,10 @@
-# Quarto
+# Quarto — apenas artefatos na raiz; docs/ é a saída publicada e deve ser versionada
 /.quarto/
-*_files/
+/*_files/
 *.knit.md
 *_cache/
+*.rmarkdown
+Rplots.pdf
 
 # R
 .Rproj.user/
@@ -19,7 +21,15 @@ __pycache__/
 # Dados brutos — baixar do OSF, não versionar
 cs_bisnode_panel.csv
 
+# Saída regenerada pela parte 1 (a base versionada é a v3)
+bisnode_2012_preprocessado_vf.csv
+
+# Cache de execução do Quarto
+/_freeze/
+
 # OS / editores
 .DS_Store
 .vscode/
 .idea/
+
+**/*.quarto_ipynb

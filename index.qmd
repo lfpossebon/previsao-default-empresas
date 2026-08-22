@@ -1,0 +1,74 @@
+---
+title: "Previsão de default de empresas"
+subtitle: "Projeto Integrador — Aprendizagem Estatística de Máquina I, PADS Insper"
+---
+
+## Objetivo
+
+Desenvolver um modelo preditivo capaz de indicar se uma empresa encerrará
+operações em um período de até dois anos, a partir de indicadores financeiros
+e cadastrais.
+
+A variável resposta `default` assume valor 1 quando a empresa encerrou
+operações em até dois anos e 0 quando permaneceu em operação.
+
+## Estrutura do trabalho
+
+O projeto está organizado em duas partes, executadas em sequência.
+
+### [1. Preparação de dados](01-preparacao-dados.ipynb)
+
+Etapa de engenharia de dados, em Python. Parte do painel bruto Bisnode
+(287.830 registros × 48 variáveis) e produz a base analítica utilizada na
+modelagem. Compreende:
+
+- diagnóstico de completude e padrões de ausência
+- recorte do ano-base e definição da variável resposta
+- tratamento de valores ausentes e de observações inconsistentes
+- transformações logarítmicas das variáveis monetárias
+- construção de razões financeiras e indicadores derivados
+- codificação de variáveis categóricas de setor e região
+
+### [2. Modelagem](02-modelagem.qmd)
+
+Etapa de modelagem estatística, em R. Compara quatro famílias de modelos sobre
+a base preparada, com calibragem de threshold e avaliação orientada ao custo do
+erro:
+
+- Regressão Logística
+- Elastic Net
+- Random Forest
+- XGBoost
+
+Inclui comparação por AUC-PR, F2-Score, estatística KS e contagem de falsos
+negativos, além de ferramentas de interpretabilidade (VIP e PDP) e análise do
+efeito do custo assimétrico sobre a seleção do modelo.
+
+## Considerações metodológicas
+
+O problema apresenta duas características que condicionam as decisões de
+modelagem.
+
+**Desbalanceamento de classes.** A maioria das empresas permanece em operação,
+de modo que um classificador que atribua a classe majoritária a todas as
+observações obtém acurácia elevada sem capacidade discriminativa.
+
+**Assimetria de custo entre os erros.** Um falso negativo corresponde a crédito
+concedido a uma empresa que encerra operações; um falso positivo corresponde à
+recusa de uma operação viável. O primeiro representa perda direta, o segundo,
+custo de oportunidade.
+
+Ambas tornam a acurácia inadequada como métrica e limitam a interpretação da
+AUC-ROC sob forte desbalanceamento. A avaliação adota AUC-PR, F2-Score,
+estatística KS e a contagem direta de falsos negativos.
+
+## Dados
+
+Painel Bisnode de empresas europeias, ano-base 2012. O painel bruto não está
+incluído no repositório; sua origem e os termos de uso estão descritos em
+`data/README.md`.
+
+## Autoria
+
+Trabalho em grupo do PADS Insper, publicado com o consentimento dos
+participantes.

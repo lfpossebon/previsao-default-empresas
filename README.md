@@ -52,35 +52,33 @@ Quatro famílias, todas com threshold calibrado em vez do corte padrão de 0.5:
 
 | Modelo | Corte | AUC-PR | F2 | KS | Recall | Precisão | FN | FP |
 |---|---|---|---|---|---|---|---|---|
-| Random Forest | 0.34 | 0.430 | 0.587 | 0.508 | 0.830 | 0.271 | 93 | 1224 |
-| Elastic Net | 0.13 | 0.407 | 0.564 | 0.483 | 0.760 | 0.277 | 131 | 1086 |
-| Regressão Logística | 0.14 | 0.405 | 0.566 | 0.484 | 0.735 | 0.294 | 145 | 963 |
-| XGBoost | 0.14 | 0.418 | 0.553 | 0.464 | 0.722 | 0.285 | 152 | 990 |
+| Random Forest | 0.33 | 0.558 | 0.676 | 0.484 | 0.883 | 0.348 | 107 | 1507 |
+| XGBoost | 0.38 | 0.548 | 0.675 | 0.473 | 0.907 | 0.334 | 85 | 1651 |
+| Elastic Net | 0.16 | 0.517 | 0.658 | 0.448 | 0.836 | 0.356 | 150 | 1379 |
+| Reg. Logística | 0.16 | 0.517 | 0.656 | 0.441 | 0.827 | 0.358 | 158 | 1352 |
 
-O Random Forest apresenta o melhor desempenho em cinco das seis métricas,
-identificando 83,0% dos defaults contra 72,2% do XGBoost, ao custo de 1.224
-falsos positivos contra 990.
+Por F2-Score, Random Forest (0,676) e XGBoost (0,675) são indistinguíveis. O
+Random Forest lidera em AUC-PR; o XGBoost apresenta o maior recall e o menor
+número de falsos negativos.
 
-A seleção do modelo, contudo, depende da parametrização de custo adotada.
-Assumindo que um default equivale à receita de três contratos adimplentes —
-premissa enunciada na Seção 4.1 do documento — o custo total `FN x 3 + FP`
-inverte o ranking:
+Aplicando a razão de custo de 3:1 enunciada no documento, o custo total
+`FN x 3 + FP` produz:
 
 | Modelo | FN | FP | Custo total |
 |---|---:|---:|---:|
-| Reg. Logística | 145 | 963 | 1.398 |
-| XGBoost | 152 | 990 | 1.446 |
-| Elastic Net | 131 | 1.086 | 1.479 |
-| Random Forest | 93 | 1.224 | 1.503 |
+| Reg. Logística | 158 | 1.352 | 1.826 |
+| Random Forest | 107 | 1.507 | 1.828 |
+| Elastic Net | 150 | 1.379 | 1.829 |
+| XGBoost | 85 | 1.651 | 1.906 |
 
-Sob 3:1 a Regressão Logística minimiza o custo total. O ponto de indiferença
-entre os dois modelos ocorre em uma razão de 5,02: abaixo dela a Regressão
-Logística é preferível; acima, o Random Forest.
+Os três primeiros ficam contidos em 0,2% de diferença. O ponto de indiferença
+entre Random Forest e Regressão Logística ocorre em uma razão de 3,04 —
+praticamente sobre a premissa adotada, de modo que a ordenação entre os dois
+não é robusta à estimativa de custo.
 
-Registre-se que o XGBoost, usualmente competitivo nesse tipo de tarefa,
-apresentou o menor recall do conjunto. Sob classes desbalanceadas e preditoras
-financeiras correlacionadas, o *bagging* mostrou desempenho superior ao
-*boosting* neste caso.
+A conclusão do trabalho é que, com as métricas disponíveis, a seleção do modelo
+não está determinada pelos dados e depende de uma estimativa mais precisa do
+custo relativo entre os dois tipos de erro.
 
 ## Interpretabilidade
 
@@ -95,33 +93,54 @@ XGBoost otimizado:
 
 ## Reproduzindo
 
-Requer R e [Quarto](https://quarto.org). As dependências estão declaradas no
-início de `modelagem.qmd` — entre elas `tidyverse`, `glmnet`, `ranger`,
-`xgboost`, `pROC`, `yardstick`, `vip` e `DALEX`.
+O projeto é um site Quarto com duas partes. Requer [Quarto](https://quarto.org),
+Python e R.
 
 ```bash
-quarto render modelagem.qmd
+quarto render
 ```
 
-O documento lê `data/bisnode_2012_preprocessado_v3.csv`, já incluído no
-repositório.
+Gera as três páginas em `docs/`.
+
+**Parte 1** requer `pandas`, `numpy`, `altair`, `seaborn`, `matplotlib`,
+`dfply` e `missingno`, além do painel bruto `cs_bisnode_panel.csv` em `data/`,
+que não é versionado — ver [`data/README.md`](data/README.md) para a origem.
+
+**Parte 2** requer as bibliotecas declaradas no início de `02-modelagem.qmd`,
+entre elas `tidyverse`, `glmnet`, `ranger`, `xgboost`, `pROC`, `yardstick`,
+`vip` e `DALEX`. Lê `data/bisnode_2012_preprocessado_v3.csv`, incluído no
+repositório, e portanto roda sem o painel bruto.
+
+> A versão do `vip` precisa ser a 0.4.1. Em builds de desenvolvimento
+> posteriores, `vip()` retorna um `data.frame` em vez de um objeto `ggplot`, e
+> os gráficos de importância não são gerados.
 
 ## Estrutura
 
 ```
-modelagem.qmd          # análise completa em R — modelos, métricas, interpretabilidade
-preprocessamento.ipynb # pipeline de preparação em Python (limpeza, feature engineering)
-data/                  # base pré-processada + procedência
-docs/index.html        # análise renderizada, publicada via GitHub Pages
+index.qmd                  # visão geral e encadeamento das duas partes
+01-preparacao-dados.ipynb  # parte 1 — engenharia de dados em Python
+02-modelagem.qmd           # parte 2 — modelagem e avaliação em R
+data/                      # base analítica + procedência e licença
+docs/                      # site renderizado, publicado via GitHub Pages
+_quarto.yml                # configuração do site
 ```
 
-### Nota sobre o pré-processamento
+### Nota sobre as duas bases
 
-`preprocessamento.ipynb` é a iteração mais recente do pipeline de preparação e
-gera 50 colunas. A base versionada em `data/` tem 49 e corresponde à versão
-efetivamente consumida pela modelagem. Rodar o notebook do zero produz um
-arquivo ligeiramente diferente do que está aqui — a diferença está em uma
-variável adicionada depois que a modelagem já havia sido fechada.
+A parte 1 gera `bisnode_2012_preprocessado_vf.csv`, com 50 colunas. A base
+versionada em `data/` é a `v3`, com 49 colunas, que é a efetivamente consumida
+pela parte 2. A diferença corresponde a uma variável acrescentada ao pipeline
+depois que a modelagem já havia sido fechada, e por isso executar a parte 1 do
+zero produz um arquivo distinto do que está versionado.
+
+### Nota sobre os resultados
+
+Os números publicados foram gerados pela execução atual do documento. Uma
+execução anterior, em ambiente com versões diferentes de R e dos pacotes,
+produziu métricas distintas para os quatro modelos. As conclusões qualitativas
+— proximidade entre os modelos e sensibilidade da ordenação à razão de custo —
+se mantêm, mas os valores absolutos dependem do ambiente de execução.
 
 ## Autoria
 
