@@ -866,8 +866,6 @@ p +
 
 ```{r}
 
-###AJUSTES FINAIS - MANTER OU NAO MANTER?
-
 # 1. Criar o Explainer do DALEX para o modelo vencedor (XGBoost)
 # Nota: O XGBoost precisa dos dados em matriz e o target numérico (0/1)
 explainer_xgb <- DALEX::explain(
@@ -904,6 +902,50 @@ plot(pdp_results) +
 
 ## Resumo Executivo
 
-### Brilhar
+### Critério de seleção
 
-##AJUSTES FINAIS
+O grupo adotou o F2-Score como métrica principal de comparação, por atribuir
+peso maior ao recall do que à precisão. A escolha é consistente com a
+assimetria de custo do problema, em que a não identificação de um default
+tende a ser mais onerosa do que um falso alarme. Por esse critério, e também
+por AUC-PR, o Random Forest obteve o melhor desempenho entre os quatro modelos
+avaliados: recall de 0,830 e 93 falsos negativos, contra 0,722 e 152 do
+XGBoost.
+
+### Efeito do custo assimétrico sobre o ranking
+
+Adotando-se a premissa de que o custo de uma empresa em default equivale à
+receita de três contratos adimplentes, o custo total de cada modelo pode ser
+expresso como `FN x 3 + FP`. Os valores resultantes são:
+
+| Modelo | FN | FP | Custo total |
+|---|---:|---:|---:|
+| Reg. Logística | 145 | 963 | 1.398 |
+| XGBoost | 152 | 990 | 1.446 |
+| Elastic Net | 131 | 1.086 | 1.479 |
+| Random Forest | 93 | 1.224 | 1.503 |
+
+Sob essa parametrização, a Regressão Logística apresenta o menor custo total e
+o Random Forest, o maior. A inversão em relação ao ranking por F2-Score decorre
+do volume de falsos positivos: a redução de 52 falsos negativos obtida pelo
+Random Forest é acompanhada de um acréscimo de 261 falsos positivos, cuja soma
+ponderada excede o ganho.
+
+O ponto de indiferença entre os dois modelos ocorre em uma razão de custo de
+5,02. Para razões inferiores, a Regressão Logística apresenta menor custo
+esperado; para razões superiores, o Random Forest.
+
+### Considerações finais
+
+Os dois critérios aplicados conduzem a modelos distintos: o F2-Score seleciona
+o Random Forest e a razão de custo de 3:1 seleciona a Regressão Logística. A
+divergência indica que a seleção depende da parametrização econômica adotada,
+e não apenas do desempenho estatístico dos modelos. Recomenda-se, previamente
+a qualquer uso produtivo, substituir a razão de 3:1 por estimativas
+específicas da carteira — perda esperada por default e margem por contrato
+adimplente.
+
+Registra-se ainda que a variável `inoffice_days` é endógena ao processo de
+encerramento das empresas, configurando risco de vazamento temporal reverso.
+Recomenda-se avaliar sua remoção e o retreinamento dos modelos antes de uso
+produtivo.

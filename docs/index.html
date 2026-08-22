@@ -2230,7 +2230,7 @@ vertical-align: -.125em;
   </ul></li>
   <li><a href="#resumo-executivo" id="toc-resumo-executivo" class="nav-link" data-scroll-target="#resumo-executivo">Resumo Executivo</a>
   <ul class="collapse">
-  <li><a href="#brilhar" id="toc-brilhar" class="nav-link" data-scroll-target="#brilhar">Brilhar</a></li>
+  <li><a href="#criterio-de-selecao" id="toc-criterio-de-selecao" class="nav-link" data-scroll-target="#criterio-de-selecao">Critério de seleção</a></li>
   </ul></li>
   </ul>
 </nav>
@@ -3290,9 +3290,7 @@ Melhor modelo por F2-Score: Random Forest </code></pre>
 <section id="partial-dependence-plot-pdp" class="level3">
 <h3 class="anchored" data-anchor-id="partial-dependence-plot-pdp">5.2 Partial Dependence Plot (PDP)</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb40"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb40-1"><a href="#cb40-1" aria-hidden="true" tabindex="-1"></a><span class="do">###AJUSTES FINAIS - MANTER OU NAO MANTER?</span></span>
-<span id="cb40-2"><a href="#cb40-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb40-3"><a href="#cb40-3" aria-hidden="true" tabindex="-1"></a><span class="co"># 1. Criar o Explainer do DALEX para o modelo vencedor (XGBoost)</span></span>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb40"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb40-3"><a href="#cb40-3" aria-hidden="true" tabindex="-1"></a><span class="co"># 1. Criar o Explainer do DALEX para o modelo vencedor (XGBoost)</span></span>
 <span id="cb40-4"><a href="#cb40-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Nota: O XGBoost precisa dos dados em matriz e o target numérico (0/1)</span></span>
 <span id="cb40-5"><a href="#cb40-5" aria-hidden="true" tabindex="-1"></a>explainer_xgb <span class="ot">&lt;-</span> DALEX<span class="sc">::</span><span class="fu">explain</span>(</span>
 <span id="cb40-6"><a href="#cb40-6" aria-hidden="true" tabindex="-1"></a>  <span class="at">model =</span> fit_xgboost_otimizado,</span>
@@ -3348,9 +3346,29 @@ Melhor modelo por F2-Score: Random Forest </code></pre>
 </section>
 <section id="resumo-executivo" class="level2">
 <h2 class="anchored" data-anchor-id="resumo-executivo">Resumo Executivo</h2>
-<section id="brilhar" class="level3">
-<h3 class="anchored" data-anchor-id="brilhar">Brilhar</h3>
-<p>##AJUSTES FINAIS</p>
+<section id="criterio-de-selecao" class="level3">
+<h3 class="anchored" data-anchor-id="criterio-de-selecao">Critério de seleção</h3>
+<p>O grupo adotou o F2-Score como métrica principal de comparação, por atribuir peso maior ao recall do que à precisão. A escolha é consistente com a assimetria de custo do problema, em que a não identificação de um default tende a ser mais onerosa do que um falso alarme. Por esse critério, e também por AUC-PR, o Random Forest obteve o melhor desempenho entre os quatro modelos avaliados: recall de 0,830 e 93 falsos negativos, contra 0,722 e 152 do XGBoost.</p>
+</section>
+<section id="efeito-do-custo-assimetrico" class="level3">
+<h3 class="anchored" data-anchor-id="efeito-do-custo-assimetrico">Efeito do custo assimétrico sobre o ranking</h3>
+<p>Adotando-se a premissa de que o custo de uma empresa em default equivale à receita de três contratos adimplentes, o custo total de cada modelo pode ser expresso como <code>FN x 3 + FP</code>. Os valores resultantes são:</p>
+<table class="table">
+<thead><tr><th>Modelo</th><th style="text-align:right">FN</th><th style="text-align:right">FP</th><th style="text-align:right">Custo total</th></tr></thead>
+<tbody>
+<tr><td>Reg. Log&iacute;stica</td><td style="text-align:right">145</td><td style="text-align:right">963</td><td style="text-align:right">1.398</td></tr>
+<tr><td>XGBoost</td><td style="text-align:right">152</td><td style="text-align:right">990</td><td style="text-align:right">1.446</td></tr>
+<tr><td>Elastic Net</td><td style="text-align:right">131</td><td style="text-align:right">1.086</td><td style="text-align:right">1.479</td></tr>
+<tr><td>Random Forest</td><td style="text-align:right">93</td><td style="text-align:right">1.224</td><td style="text-align:right">1.503</td></tr>
+</tbody>
+</table>
+<p>Sob essa parametrização, a Regressão Logística apresenta o menor custo total e o Random Forest, o maior. A inversão em relação ao ranking por F2-Score decorre do volume de falsos positivos: a redução de 52 falsos negativos obtida pelo Random Forest é acompanhada de um acréscimo de 261 falsos positivos, cuja soma ponderada excede o ganho.</p>
+<p>O ponto de indiferença entre os dois modelos ocorre em uma razão de custo de 5,02. Para razões inferiores, a Regressão Logística apresenta menor custo esperado; para razões superiores, o Random Forest.</p>
+</section>
+<section id="consideracoes-finais" class="level3">
+<h3 class="anchored" data-anchor-id="consideracoes-finais">Considerações finais</h3>
+<p>Os dois critérios aplicados conduzem a modelos distintos: o F2-Score seleciona o Random Forest e a razão de custo de 3:1 seleciona a Regressão Logística. A divergência indica que a seleção depende da parametrização econômica adotada, e não apenas do desempenho estatístico dos modelos. Recomenda-se, previamente a qualquer uso produtivo, substituir a razão de 3:1 por estimativas específicas da carteira &mdash; perda esperada por default e margem por contrato adimplente.</p>
+<p>Registra-se ainda que a variável <code>inoffice_days</code> é endógena ao processo de encerramento das empresas, configurando risco de vazamento temporal reverso. Recomenda-se avaliar sua remoção e o retreinamento dos modelos antes de uso produtivo.</p>
 </section>
 </section>
 

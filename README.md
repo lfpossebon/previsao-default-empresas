@@ -10,22 +10,21 @@ disciplina de Aprendizagem Estatística de Máquina I — PADS Insper.
 
 ## O problema
 
-Prever falência é um problema de classificação com duas características que
-condicionam todas as decisões de modelagem:
+A previsão de encerramento de operações é um problema de classificação com
+duas características que condicionam as decisões de modelagem.
 
-**As classes são desbalanceadas.** A maioria das empresas continua operando, e
-um classificador que responde "não vai quebrar" para todo mundo acerta a maior
-parte das vezes sem ter aprendido nada.
+**Desbalanceamento de classes.** A maioria das empresas permanece em operação,
+de modo que um classificador que atribua a classe majoritária a todas as
+observações obtém acurácia elevada sem capacidade discriminativa.
 
-**Os erros custam valores diferentes.** Deixar de identificar uma empresa que
-vai quebrar — falso negativo — significa crédito concedido que não volta.
-Sinalizar uma empresa saudável como risco — falso positivo — significa negócio
-perdido. Em crédito, o primeiro erro é caro; o segundo é um custo de
-oportunidade.
+**Assimetria de custo entre os erros.** Um falso negativo corresponde a crédito
+concedido a uma empresa que encerra operações; um falso positivo corresponde à
+recusa de uma operação viável. O primeiro representa perda direta, o segundo,
+custo de oportunidade.
 
-Isso orienta a escolha de métricas: acurácia é inútil aqui, e mesmo a AUC-ROC
-padrão engana sob desbalanceamento. A avaliação usa **AUC-PR**, **F2** (que
-pesa recall acima de precisão), **KS** e a contagem direta de falsos negativos.
+Ambas as características tornam a acurácia inadequada como métrica e limitam a
+interpretação da AUC-ROC sob forte desbalanceamento. A avaliação adota AUC-PR,
+F2-Score, estatística KS e a contagem direta de falsos negativos.
 
 ## Dados
 
@@ -53,28 +52,40 @@ Quatro famílias, todas com threshold calibrado em vez do corte padrão de 0.5:
 
 | Modelo | Corte | AUC-PR | F2 | KS | Recall | Precisão | FN | FP |
 |---|---|---|---|---|---|---|---|---|
-| **Random Forest** | 0.34 | **0.430** | **0.587** | **0.508** | **0.830** | 0.271 | **93** | 1224 |
+| Random Forest | 0.34 | 0.430 | 0.587 | 0.508 | 0.830 | 0.271 | 93 | 1224 |
 | Elastic Net | 0.13 | 0.407 | 0.564 | 0.483 | 0.760 | 0.277 | 131 | 1086 |
-| Regressão Logística | 0.14 | 0.405 | 0.566 | 0.484 | 0.735 | **0.294** | 145 | 963 |
+| Regressão Logística | 0.14 | 0.405 | 0.566 | 0.484 | 0.735 | 0.294 | 145 | 963 |
 | XGBoost | 0.14 | 0.418 | 0.553 | 0.464 | 0.722 | 0.285 | 152 | 990 |
 
-**Random Forest vence em cinco das seis métricas relevantes** e captura 83% dos
-defaults, contra 72% do XGBoost. O preço é explícito: 1.224 falsos positivos
-contra 990 do XGBoost.
+O Random Forest apresenta o melhor desempenho em cinco das seis métricas,
+identificando 83,0% dos defaults contra 72,2% do XGBoost, ao custo de 1.224
+falsos positivos contra 990.
 
-Essa é a decisão central do trabalho. O Random Forest deixa passar 93 empresas
-que quebraram, o XGBoost deixa passar 152 — 59 a mais. Em troca, o Random
-Forest sinaliza 234 empresas saudáveis a mais como risco. Se o custo de um
-falso negativo supera o de um falso positivo em mais de ~4:1, o Random Forest é
-a escolha economicamente correta mesmo perdendo em precisão.
+A seleção do modelo, contudo, depende da parametrização de custo adotada.
+Assumindo que um default equivale à receita de três contratos adimplentes —
+premissa enunciada na Seção 4.1 do documento — o custo total `FN x 3 + FP`
+inverte o ranking:
 
-Vale notar que o XGBoost, geralmente o favorito nesse tipo de tarefa, ficou em
-último em recall. Sob classes desbalanceadas e preditoras financeiras
-fortemente correlacionadas, a estabilidade do *bagging* superou o *boosting*.
+| Modelo | FN | FP | Custo total |
+|---|---:|---:|---:|
+| Reg. Logística | 145 | 963 | 1.398 |
+| XGBoost | 152 | 990 | 1.446 |
+| Elastic Net | 131 | 1.086 | 1.479 |
+| Random Forest | 93 | 1.224 | 1.503 |
+
+Sob 3:1 a Regressão Logística minimiza o custo total. O ponto de indiferença
+entre os dois modelos ocorre em uma razão de 5,02: abaixo dela a Regressão
+Logística é preferível; acima, o Random Forest.
+
+Registre-se que o XGBoost, usualmente competitivo nesse tipo de tarefa,
+apresentou o menor recall do conjunto. Sob classes desbalanceadas e preditoras
+financeiras correlacionadas, o *bagging* mostrou desempenho superior ao
+*boosting* neste caso.
 
 ## Interpretabilidade
 
-O modelo vencedor não é tratado como caixa-preta:
+A Seção 5 do documento aplica as ferramentas de interpretabilidade sobre o
+XGBoost otimizado:
 
 - **VIP** — ranking de importância das variáveis
 - **PDP** via DALEX — efeito marginal das quatro variáveis mais importantes
